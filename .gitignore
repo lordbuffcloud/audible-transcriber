@@ -1,0 +1,9 @@
+venv/
+.env
+auth.json
+transcripts/
+*.aax
+*.wav
+__pycache__/
+*.pyc
+.pytest_cache/

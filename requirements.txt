@@ -1,0 +1,5 @@
+audible
+click
+openai-whisper
+python-dotenv
+requests
