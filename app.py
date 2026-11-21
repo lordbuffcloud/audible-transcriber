@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""
-Audible Transcriber Web UI
-Dark-themed Flask app with real-time progress via WebSocket
-"""
+# ⬡ CK42X · ck42x.com
+# MODULE: flask web ui for audible transcription with websocket progress
+# gold on black. sting once.
 import os
 import sys
 import json
@@ -18,22 +17,25 @@ from audible import Authenticator, Client
 dotenv.load_dotenv()
 
 app = Flask(__name__)
+# SAFETY: hardcoded literal secret key; anyone with the source can forge session cookies
 app.config['SECRET_KEY'] = 'audible-transcriber-secret'
 socketio = SocketIO(app, async_mode='eventlet')
 
 AUTH_FILE = os.getenv("AUDIBLE_AUTH_FILE", "auth.json")
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./transcripts")
+# TRAP: bound once at import; /auth appends to .env but load_dotenv never refreshes this constant
 ACTIVATION_BYTES = os.getenv("AUDIBLE_ACTIVATION_BYTES")
 
-# Store job status
 jobs = {}
 
 @app.route('/')
 def index():
+    """serve the single-page ui."""
     return render_template('index.html')
 
 @app.route('/auth', methods=['POST'])
 def auth():
+    """log in to audible; writes AUTH_FILE and appends activation bytes to .env."""
     username = request.json.get('username')
     password = request.json.get('password')
     locale = request.json.get('locale', 'us')
@@ -46,14 +48,12 @@ def auth():
         )
         auth.to_file(AUTH_FILE)
         
-        # Get activation bytes
         from audible.auth import get_activation_bytes
         activation_bytes = get_activation_bytes(auth)
         
         with open('.env', 'a') as f:
             f.write(f'\nAUDIBLE_ACTIVATION_BYTES={activation_bytes}\n')
         
-        # Reload env
         dotenv.load_dotenv()
         
         socketio.emit('auth_status', {'status': 'success', 'message': 'Authenticated!'})
@@ -64,6 +64,7 @@ def auth():
 
 @app.route('/list-books')
 def list_books():
+    """return library books as json, stopping once 50 are collected; error payload when unauthenticated."""
     if not os.path.exists(AUTH_FILE):
         return jsonify({'error': 'Not authenticated'})
     
@@ -73,7 +74,7 @@ def list_books():
         
         books = []
         page = 1
-        while len(books) < 50:  # Limit to 50 for UI
+        while len(books) < 50:
             response = client.get("library/books", params={"page": page, "per_page": 50})
             items = response.get("items", [])
             if not items:
@@ -92,6 +93,7 @@ def list_books():
 
 @app.route('/transcribe', methods=['POST'])
 def transcribe():
+    """start a background pipeline for one asin; returns the job_id immediately."""
     asin = request.json.get('asin')
     model_size = request.json.get('model', 'base')
     fmt = request.json.get('format', 'txt')
@@ -99,6 +101,7 @@ def transcribe():
     if not asin:
         return jsonify({'error': 'ASIN required'})
     
+    # TRAP: ids come from len(jobs)+1 with no lock; entries are never removed
     job_id = f"job_{len(jobs)+1}"
     jobs[job_id] = {'status': 'running', 'progress': 0}
     
@@ -109,7 +112,6 @@ def transcribe():
             auth = Authenticator.from_file(AUTH_FILE)
             client = Client(auth=auth)
             
-            # Download
             socketio.emit('progress', {'job_id': job_id, 'progress': 20, 'message': 'Downloading AAX...'})
             aax_path = f"./temp_{asin}.aax"
             product = client.get_product(asin)
@@ -122,24 +124,23 @@ def transcribe():
                 for chunk in response.iter_content(chunk_size=8192):
                     f.write(chunk)
             
-            # Decrypt
             socketio.emit('progress', {'job_id': job_id, 'progress': 40, 'message': 'Decrypting...'})
             wav_path = f"./temp_{asin}.wav"
+            # WHY: whisper expects 16 khz audio
             cmd = ["ffmpeg", "-y", "-activation_bytes", ACTIVATION_BYTES,
                    "-i", aax_path, "-acodec", "pcm_s16le", "-ar", "16000", wav_path]
             subprocess.run(cmd, check=True, capture_output=True)
             
-            # Transcribe
             socketio.emit('progress', {'job_id': job_id, 'progress': 60, 'message': 'Loading Whisper model...'})
             model = whisper.load_model(model_size)
             socketio.emit('progress', {'job_id': job_id, 'progress': 70, 'message': 'Transcribing...'})
             result = model.transcribe(wav_path, fp16=False)
             
-            # Save
             socketio.emit('progress', {'job_id': job_id, 'progress': 90, 'message': 'Saving transcript...'})
             Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
             output_base = os.path.join(OUTPUT_DIR, asin)
             
+            # TRAP: fmt outside txt/json leaves output_file unbound; the final emit raises NameError
             if fmt == 'txt':
                 output_file = Path(output_base).with_suffix('.txt')
                 with open(output_file, 'w', encoding='utf-8') as f:
@@ -149,7 +150,6 @@ def transcribe():
                 with open(output_file, 'w', encoding='utf-8') as f:
                     json.dump(result, f, indent=2, ensure_ascii=False)
             
-            # Cleanup
             os.remove(aax_path)
             os.remove(wav_path)
             
@@ -167,7 +167,9 @@ def transcribe():
 
 @app.route('/transcripts/<path:filename>')
 def download_transcript(filename):
+    """serve a transcript file from OUTPUT_DIR."""
     return send_from_directory(OUTPUT_DIR, filename)
 
 if __name__ == '__main__':
+    # SAFETY: development server bound to every interface with debug=True
     socketio.run(app, host='0.0.0.0', port=5000, debug=True)

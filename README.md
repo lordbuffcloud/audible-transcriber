@@ -1,11 +1,13 @@
 # Audible Transcriber
 
-Full-pipeline CLI tool to transcribe Audible audiobooks to text.
+*gold on black. sting once.*
+
+CLI tool that transcribes Audible audiobooks to text.
 
 ## Features
 - Authenticate with Audible and retrieve activation bytes
 - List your Audible library with ASINs
-- Download AAX files directly from Audible
+- Download AAX files from Audible
 - Decrypt AAX to WAV using ffmpeg + activation bytes
 - Transcribe audio using OpenAI Whisper (multiple model sizes)
 - Output formats: plain text, SRT subtitles, JSON
