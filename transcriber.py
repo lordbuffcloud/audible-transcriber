@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""
-Audible Transcriber - Full pipeline: auth -> download -> decrypt -> transcribe
-"""
+# ⬡ CK42X · ck42x.com
+# MODULE: click cli pipeline for audible books: auth, download, decrypt, transcribe
+# gold on black. sting once.
 import os
 import sys
 import click
@@ -13,7 +13,6 @@ import requests
 import json
 from pathlib import Path
 
-# Load .env
 dotenv.load_dotenv()
 
 ACTIVATION_BYTES = os.getenv("AUDIBLE_ACTIVATION_BYTES")
@@ -21,9 +20,8 @@ AUTH_FILE = os.getenv("AUDIBLE_AUTH_FILE", "auth.json")
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./transcripts")
 
 def get_activation_bytes(auth):
-    """Retrieve activation bytes from Audible account."""
+    """return activation bytes for the account; any failure becomes RuntimeError."""
     try:
-        # The audible package can extract activation bytes via the API
         from audible.auth import get_activation_bytes
         bytes_val = get_activation_bytes(auth)
         return bytes_val
@@ -31,16 +29,14 @@ def get_activation_bytes(auth):
         raise RuntimeError(f"Failed to get activation bytes: {e}")
 
 def download_aax(client, asin, output_path):
-    """Download AAX file from Audible."""
+    """stream the aax to output_path and return it; url/http failures become RuntimeError."""
     click.echo(f"Downloading AAX for ASIN: {asin}")
     try:
-        # Use the client to get the download URL
         product = client.get_product(asin)
         content_url = product.get("content_url")
         if not content_url:
             raise ValueError("No download URL found")
         
-        # Download using requests
         response = requests.get(content_url, stream=True)
         response.raise_for_status()
         
@@ -53,14 +49,14 @@ def download_aax(client, asin, output_path):
         raise RuntimeError(f"Download failed: {e}")
 
 def decrypt_aax(aax_path, output_wav, activation_bytes):
-    """Decrypt AAX to WAV using ffmpeg."""
+    """decrypt aax to wav via ffmpeg; return output_wav. failure raises RuntimeError with stderr."""
     click.echo(f"Decrypting {aax_path} to {output_wav}")
     cmd = [
         "ffmpeg", "-y",
         "-activation_bytes", activation_bytes,
         "-i", aax_path,
         "-acodec", "pcm_s16le",
-        "-ar", "16000",  # Whisper expects 16kHz
+        "-ar", "16000",  # WHY: whisper expects 16 khz audio
         output_wav
     ]
     try:
@@ -71,7 +67,7 @@ def decrypt_aax(aax_path, output_wav, activation_bytes):
         raise RuntimeError(f"Decryption failed: {e.stderr.decode()}")
 
 def transcribe_audio(wav_path, model_size="base"):
-    """Transcribe WAV using Whisper."""
+    """run whisper on wav_path; return the raw result dict with text and segments."""
     click.echo(f"Loading Whisper model: {model_size}")
     model = whisper.load_model(model_size)
     click.echo(f"Transcribing {wav_path}")
@@ -79,7 +75,8 @@ def transcribe_audio(wav_path, model_size="base"):
     return result
 
 def save_transcript(result, output_path, format="txt"):
-    """Save transcription result."""
+    """write result as txt, srt, or json; return the output path under OUTPUT_DIR."""
+    # TRAP: parameter format shadows the builtin
     Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
     
     if format == "txt":
@@ -91,6 +88,7 @@ def save_transcript(result, output_path, format="txt"):
         with open(output_file, "w", encoding="utf-8") as f:
             for i, segment in enumerate(result["segments"], 1):
                 f.write(f"{i}\n")
+                # TRAP: raw float seconds; srt needs HH:MM:SS,mmm and players reject this file
                 f.write(f"{segment['start']:.3f} --> {segment['end']:.3f}\n")
                 f.write(f"{segment['text'].strip()}\n\n")
     elif format == "json":
@@ -98,12 +96,13 @@ def save_transcript(result, output_path, format="txt"):
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2, ensure_ascii=False)
     
+    # TRAP: unknown format leaves output_file unbound; this echo raises NameError
     click.echo(f"Saved transcript to {output_file}")
     return output_file
 
 @click.group()
 def cli():
-    """Audible Audiobook Transcriber"""
+    """audible audiobook transcriber cli."""
     pass
 
 @cli.command()
@@ -111,7 +110,7 @@ def cli():
 @click.option("--password", prompt=True, hide_input=True)
 @click.option("--locale", default="us", help="Audible locale (us, uk, de, etc.)")
 def auth(username, password, locale):
-    """Authenticate with Audible and save credentials."""
+    """log in, save credentials to AUTH_FILE, append activation bytes to .env; exit 1 on failure."""
     click.echo("Authenticating with Audible...")
     try:
         auth = Authenticator.from_login(
@@ -122,7 +121,6 @@ def auth(username, password, locale):
         auth.to_file(AUTH_FILE)
         click.echo(f"Saved auth to {AUTH_FILE}")
         
-        # Get activation bytes
         activation_bytes = get_activation_bytes(auth)
         with open(".env", "a") as f:
             f.write(f"\nAUDIBLE_ACTIVATION_BYTES={activation_bytes}\n")
@@ -136,7 +134,7 @@ def auth(username, password, locale):
 @click.option("--model", default="base", help="Whisper model size (tiny, base, small, medium, large)")
 @click.option("--format", default="txt", type=click.Choice(["txt", "srt", "json"]), help="Output format")
 def transcribe(asin, model, format):
-    """Full pipeline: download, decrypt, transcribe."""
+    """download, decrypt, transcribe one asin; exit 1 when auth or activation bytes are missing."""
     if not os.path.exists(AUTH_FILE):
         click.echo("Auth file not found. Run 'auth' command first.", err=True)
         sys.exit(1)
@@ -146,26 +144,20 @@ def transcribe(asin, model, format):
         sys.exit(1)
     
     try:
-        # Load auth
         auth = Authenticator.from_file(AUTH_FILE)
         client = Client(auth=auth)
         
-        # Download
         aax_path = f"./temp_{asin}.aax"
         download_aax(client, asin, aax_path)
         
-        # Decrypt
         wav_path = f"./temp_{asin}.wav"
         decrypt_aax(aax_path, wav_path, ACTIVATION_BYTES)
         
-        # Transcribe
         result = transcribe_audio(wav_path, model)
         
-        # Save
         output_base = os.path.join(OUTPUT_DIR, asin)
         save_transcript(result, output_base, format)
         
-        # Cleanup
         os.remove(aax_path)
         os.remove(wav_path)
         click.echo("Done!")
@@ -179,24 +171,20 @@ def transcribe(asin, model, format):
 @click.option("--model", default="base", help="Whisper model size")
 @click.option("--format", default="txt", type=click.Choice(["txt", "srt", "json"]))
 def transcribe_file(input, model, format):
-    """Transcribe an existing AAX file (no download)."""
+    """decrypt and transcribe a local aax; exit 1 without activation bytes."""
     if not ACTIVATION_BYTES:
         click.echo("Activation bytes not found. Run 'auth' command first.", err=True)
         sys.exit(1)
     
     try:
-        # Decrypt
         wav_path = "./temp_decrypted.wav"
         decrypt_aax(input, wav_path, ACTIVATION_BYTES)
         
-        # Transcribe
         result = transcribe_audio(wav_path, model)
         
-        # Save
         output_base = os.path.join(OUTPUT_DIR, Path(input).stem)
         save_transcript(result, output_base, format)
         
-        # Cleanup
         os.remove(wav_path)
         click.echo("Done!")
         
@@ -206,7 +194,7 @@ def transcribe_file(input, model, format):
 
 @cli.command()
 def list_books():
-    """List books in your Audible library."""
+    """print every library book; exit 1 without an auth file."""
     if not os.path.exists(AUTH_FILE):
         click.echo("Auth file not found. Run 'auth' command first.", err=True)
         sys.exit(1)
@@ -214,7 +202,6 @@ def list_books():
     auth = Authenticator.from_file(AUTH_FILE)
     client = Client(auth=auth)
     
-    # Paginate through library
     page = 1
     while True:
         response = client.get("library/books", params={"page": page, "per_page": 50})
